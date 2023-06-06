@@ -1,0 +1,431 @@
+#include <Arduino.h>
+#include <SPI.h>
+// #include <TFT_eSPI.h>
+#include <Wire.h>
+// #include <lvgl.h>
+
+#include "AudioLibs/AudioKit.h"
+#include "AudioTools.h"
+#include "ChipInfo.h"
+#include "Spdif.h"
+#include "lv_conf.h"
+// #include "ui/ui.h"
+#include "AudioCodecs/CodecMP3Helix.h"
+// #include "AudioCodecs/CodecMP3MAD.h"
+#include "CustomPrint.h"
+
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#define MINIMP3_NO_STDIO
+#include "minimp3.h"
+
+#define USE_RAW_SD
+
+#ifdef USE_RAW_SD
+	#include <SD.h>
+	// #include "AudioLibs/AudioSourceSD.h"
+#else
+	#include <SdFat.h>
+
+	#include "AudioLibs/AudioSourceSDFAT.h"	 // or AudioSourceIdxSD.h
+#endif
+
+// APP SETTINGS FINISH
+#define TFT_LED 21	// Backlight
+// static const uint16_t screenWidth = 320;
+// static const uint16_t screenHeight = 240;
+
+// static lv_disp_draw_buf_t draw_buf;
+// static lv_color_t buf[screenWidth * screenHeight / 10];
+
+// Main classes
+
+// TFT_eSPI tft = TFT_eSPI();
+// AudioGeneratorMP3* mp3;
+// AudioFileSourceID3* id3;
+// AudioFileSourceSD* sourceFile;
+// AudioOutputSPDIF* out;
+// Spdif* out;
+
+/* Display flushing */
+// void my_disp_flush(lv_disp_drv_t* disp, const lv_area_t* area, lv_color_t* color_p) {
+// 	uint32_t w = (area->x2 - area->x1 + 1);
+// 	uint32_t h = (area->y2 - area->y1 + 1);
+//
+// 	tft.startWrite();
+// 	tft.setAddrWindow(area->x1, area->y1, w, h);
+// 	tft.pushColors((uint16_t*)&color_p->full, w * h, true);
+// 	tft.endWrite();
+//
+// 	lv_disp_flush_ready(disp);
+// }
+//
+// void UpdateTFT(void* pvParameters) {
+// 	while (true) {
+// 		lv_timer_handler(); /* let the GUI do its work */
+// 		// vTaskDelay(10 / portTICK_PERIOD_MS);
+// 		vTaskDelay(pdMS_TO_TICKS(10));
+// 	}
+// }
+
+// void listDir(fs::FS& fs, const char* dirname, uint8_t levels) {
+// 	Serial.printf("Listing directory: %s\n", dirname);
+//
+// 	File root = fs.open(dirname);
+// 	if (!root) {
+// 		Serial.println("Failed to open directory");
+// 		return;
+// 	}
+// 	if (!root.isDirectory()) {
+// 		Serial.println("Not a directory");
+// 		return;
+// 	}
+//
+// 	File file = root.openNextFile();
+// 	while (file) {
+// 		if (file.isDirectory()) {
+// 			Serial.print("  DIR : ");
+// 			Serial.println(file.name());
+// 			if (levels) {
+// 				listDir(fs, file.name(), levels - 1);
+// 			}
+// 		}
+// 		else {
+// 			Serial.print("  PATH: ");
+// 			Serial.print(file.path());
+// 			Serial.print("  FILE: ");
+// 			Serial.print(file.name());
+// 			Serial.print("  SIZE: ");
+// 			Serial.println(file.size());
+// 		}
+// 		file = root.openNextFile();
+// 	}
+// }
+
+#if LV_USE_LOG != 0
+/* Serial debugging */
+void my_print(const char* buf) {
+	Serial.printf(buf);
+	Serial.flush();
+}
+#endif
+
+// SPIClass SPIX(HSPI);
+// void initSD() {
+// 	// SPIX.begin(5, 33, 32, 22);
+//
+// 	// SPI.begin(34, 33, 32, 35);
+// 	if (!SD.begin(5)) {
+// 		Serial.println("Card Mount Failed");
+// 		return;
+// 	}
+// 	uint8_t cardType = SD.cardType();
+//
+// 	if (cardType == CARD_NONE) {
+// 		Serial.println("No SD card attached");
+// 		return;
+// 	}
+//
+// 	Serial.print("SD Card Type: ");
+// 	if (cardType == CARD_MMC) {
+// 		Serial.println("MMC");
+// 	}
+// 	else if (cardType == CARD_SD) {
+// 		Serial.println("SDSC");
+// 	}
+// 	else if (cardType == CARD_SDHC) {
+// 		Serial.println("SDHC");
+// 	}
+// 	else {
+// 		Serial.println("UNKNOWN");
+// 	}
+// }
+
+// const char* startFilePath = "/";
+// const char* ext = "mp3";
+// AudioSourceSDFAT* source;
+// AudioSourceSD* source;
+// SPDIFOutput* spdif;
+// AudioPlayer* player;
+// StreamCopy* copier;
+// EncodedAudioStream* out2dec;
+#ifdef USE_RAW_SD
+File audioFile;
+#else
+FsFile audioFile;
+SdFile dir;
+SdFs SDx;
+#endif
+
+void printMetaData(MetaDataType type, const char* str, int len) {
+	Serial.print("==> ");
+	Serial.print(toStr(type));
+	Serial.print(": ");
+	Serial.println(str);
+}
+
+#ifdef USE_RAW_SD
+#else
+void displayDirectoryContent(FsFile& aDirectory, byte tabulation) {
+	FsFile file;
+	char fileName[20];
+
+	if (!aDirectory.isDir()) return;
+	aDirectory.rewind();
+
+	while (file.openNext(&aDirectory, O_READ)) {
+		if (!file.isHidden()) {
+			file.getName(fileName, sizeof(fileName));
+			for (uint8_t i = 0; i < tabulation; i++) Serial.write('\t');
+			Serial.print(fileName);
+
+			if (file.isDir()) {
+				Serial.println(F("/"));
+				displayDirectoryContent(file, tabulation + 1);
+			}
+			else {
+				Serial.write('\t');
+				Serial.print(file.fileSize());
+				Serial.println(F(" bytes"));
+			}
+		}
+		file.close();
+	}
+}
+#endif
+
+CustomPrint* custom;
+const int BUFFER_SIZE = 2048;
+static mp3dec_t mp3d;
+
+static mp3d_sample_t* pcm;
+uint8_t input_buf[BUFFER_SIZE] = {0};
+
+// extern "C"
+// {
+// void app_main();
+// }
+
+void play_task(void *param) {
+	audioFile = SD.open("/testold.mp3");
+
+	if (!audioFile) {
+		Serial.printf("failed to open file SD");
+	}
+	// auto spdif = new Spdif();
+	// spdif->init(44100);
+	custom = new CustomPrint();
+	pcm = (mp3d_sample_t*)malloc(sizeof(mp3d_sample_t) * MINIMP3_MAX_SAMPLES_PER_FRAME);
+	// auto* input_buf = (uint8_t*)malloc(BUFFER_SIZE);
+	if (!pcm) {
+		ESP_LOGE("main", "Failed to allocate pcm memory");
+	}
+	if (!input_buf) {
+		ESP_LOGE("main", "Failed to allocate input_buf memory");
+	}
+
+	// dec->setNotifyAudioChange(AudioInfoSupport)
+
+	// mp3 decoder state
+	mp3dec_init(&mp3d);
+	mp3dec_frame_info_t info = {};
+	// keep track of how much data we have buffered, need to read and decoded
+	int to_read = BUFFER_SIZE;
+	int buffered = 0;
+	int decoded = 0;
+	bool is_output_started = false;
+
+	while (audioFile.available()) {
+		size_t n = audioFile.readBytes((char*)(input_buf + buffered), to_read);
+
+		// size_t n = fread(input_buf + buffered, 1, to_read, audioFile);
+		// feed the watchdog
+		vTaskDelay(pdMS_TO_TICKS(1));
+		// ESP_LOGI("main", "Read %d bytes\n", n);
+		buffered += n;
+		if (buffered == 0) {
+			// we've reached the end of the file and processed all the buffered data
+			// output->stop();
+			is_output_started = false;
+			Serial.println("Reached end");
+			break;
+		}
+
+		// decode the next frame
+		int samples = mp3dec_decode_frame(&mp3d, input_buf, buffered, pcm, &info);
+		// we've processed this may bytes from teh buffered data
+		buffered -= info.frame_bytes;
+		// shift the remaining data to the front of the buffer
+		memmove(input_buf, input_buf + info.frame_bytes, buffered);
+		// we need to top up the buffer from the file
+		to_read = info.frame_bytes;
+		if (samples > 0) {
+			Serial.printf("samples %d\n", samples);
+			// if we haven't started the output yet we can do it now as we now know the sample rate and number of
+			// channels
+			if (!is_output_started) {
+				// output->start(info.hz);
+				Serial.printf("SAMPLE RATE: %d", info.hz);
+				Serial.printf("bitrate_kbps: %d", info.bitrate_kbps);
+				Serial.printf("channels: %d", info.channels);
+				Serial.printf("frame_bytes: %d", info.frame_bytes);
+				is_output_started = true;
+			}
+			// if we've decoded a frame of mono samples convert it to stereo by duplicating the left channel
+			// we can do this in place as our samples buffer has enough space
+			if (info.channels == 1) {
+				for (int i = samples - 1; i >= 0; i--) {
+					pcm[i * 2] = pcm[i];
+					pcm[i * 2 - 1] = pcm[i];
+				}
+			}
+			// Serial.printf("%d %d %d %d ", pcm[0], pcm[1],pcm[2],pcm[3]);
+			// write the decoded samples to the I2S output
+			custom->write(pcm, samples);
+			// keep track of how many samples we've decoded
+			decoded += samples;
+		}
+		else {
+			Serial.println("Samples 0");
+		}
+
+		// dec->write(buff, x);
+		// Serial.printf("Wr %d\n", n);
+	}
+	audioFile.close();
+}
+
+// void app_main()
+// {
+// 	xTaskCreatePinnedToCore(play_task, "task", 32768, NULL, 1, NULL, 1);
+// }
+
+void setup() {
+	// Debug only
+	Serial.begin(115200);
+
+	if (!SD.begin(5)) {
+		Serial.printf("failed to init SD");
+	}
+
+	xTaskCreatePinnedToCore(play_task, "task", 32768, NULL, 1, NULL, 1);
+	// Turn on backlight
+	// pinMode(TFT_LED, OUTPUT);
+	// digitalWrite(TFT_LED, HIGH);
+	//
+	// String LVGL_Arduino = "Hello Arduino! ";
+	// LVGL_Arduino += String('V') + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
+
+	// Serial.println(LVGL_Arduino);
+	// Serial.println("I am LVGL_Arduino");
+
+	// listDir(SD, "/", 0);
+
+	// AudioLogger::instance().begin(Serial, AudioLogger::Info);
+
+	// source = new AudioSourceSDFAT(startFilePath, ext, 5);
+	// source = new AudioSourceSD(startFilePath, ext, 5);
+	// Serial.printf("SIZE: %d", source->());
+	// SDx.begin(5);
+
+#ifdef USE_RAW_SD
+
+	// audioFile = SD.open("/testold.mp3");
+#else
+	if (!SDx.begin(SdSpiConfig(5, DEDICATED_SPI, SD_SCK_MHZ(10)))) {
+		SDx.initErrorHalt(&Serial);
+	}
+
+	auto root = SDx.open("/");
+	displayDirectoryContent(root, 0);
+	audioFile = SDx.open("/testold.mp3");
+#endif
+
+	// Serial.printf("file size %d\n", audioFile.size());
+	// Serial.printf("file is av %d\n", audioFile.available());
+	//
+	// // setup I2S based on sampling rate provided by decoder
+	//
+	// spdif = new SPDIFOutput();
+	//
+	// auto cfg = spdif->defaultConfig();
+	// cfg.pin_data = 27;
+	// cfg.sample_rate = 44100;
+	// cfg.channels = 2;
+	// cfg.bits_per_sample = 16;
+	// spdif->begin(cfg);
+	//
+	// out2dec = new EncodedAudioStream(spdif, new MP3DecoderHelix());
+	// // out2dec->setNotifyAudioChange(&custom);
+	// out2dec->begin();
+	//
+	// copier = new StreamCopy(*out2dec, audioFile, 384);
+	// copier->begin();
+	// setting initial volume
+	// volume.setVolume(0.5);
+
+	// player = new AudioPlayer(*source, *spdif, decoder);
+	// player->setMetadataCallback(printMetaData);
+	// player->begin();
+	// player->play();
+	// lv_init();
+	// initSD();
+	// dir = SD.open("/");
+
+#if LV_USE_LOG != 0
+	lv_log_register_print_cb(my_print); /* register print function for debugging */
+#endif
+
+	// tft.begin();		/* TFT init */
+	// tft.setRotation(3); /* Landscape orientation, flipped */
+	//
+	// lv_disp_draw_buf_init(&draw_buf, buf, nullptr, screenWidth * screenHeight / 10);
+	//
+	// /*Initialize the display*/
+	// static lv_disp_drv_t disp_drv;
+	// lv_disp_drv_init(&disp_drv);
+	// /*Change the following line to your display resolution*/
+	// disp_drv.hor_res = screenWidth;
+	// disp_drv.ver_res = screenHeight;
+	// disp_drv.flush_cb = my_disp_flush;
+	// disp_drv.draw_buf = &draw_buf;
+	// lv_disp_drv_register(&disp_drv);
+	//
+	// ui_init();
+
+	// xTaskCreatePinnedToCore(UpdateTFT, "UpdateTFT", 16384, nullptr, 1, nullptr, 1);
+
+	Serial.print("Starting up app");
+
+	// out = new Spdif();
+	// out->init(44100);
+
+	// audioLogger = &Serial;
+	// sourceFile = new AudioFileSourceSD("/test.mp3");
+	// id3 = new AudioFileSourceID3(sourceFile);
+	// id3->RegisterMetadataCB(MDCallback, (void*)"ID3TAG");
+	//
+	// out = new AudioOutputSPDIF(12, 0, 2);
+	// mp3 = new AudioGeneratorMP3();
+	//
+	// mp3->begin(id3, out);
+
+}
+
+
+void loop() {
+
+	// Serial.printf("written %d\n", s);
+
+	// if (mp3->isRunning()) {
+	// 	if (!mp3->loop()) mp3->stop();
+	// 	Serial.printf("MP3 run\n");
+	// }
+	// else {
+	// 	Serial.printf("MP3 done\n");
+	// 	delay(5000);
+	// 	ChipInfo::printChipInfo();
+	// }
+
+	// vTaskDelay(pdMS_TO_TICKS(100));
+}
