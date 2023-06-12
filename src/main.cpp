@@ -6,6 +6,7 @@
 #include <random>
 
 #include "AudioCodecs/CodecMP3Helix.h"
+// #include "AudioCodecs/CodecMP3MAD.h"
 #include "AudioTools.h"
 
 typedef int16_t sound_t;  // sound will be represented as int16_t (with 2 bytes)
@@ -13,6 +14,8 @@ AudioInfo info(44100, 2, 16);
 SPDIFOutput* out;
 StreamCopy* copier;	// copies sound into i2s
 EncodedAudioStream* dec;
+VolumeStream* volume;
+LogarithmicVolumeControl lvc(0.1);
 
 SdFat SDx;
 FsFile audioFile;
@@ -37,7 +40,7 @@ void play(const char* phrase) {
 void setup() {
 	// Open Serial
 	Serial.begin(115200);
-	AudioLogger::instance().begin(Serial, AudioLogger::Info);
+	AudioLogger::instance().begin(Serial, AudioLogger::Warning);
 
 	if (!SDx.begin(SdSpiConfig(5, DEDICATED_SPI, SD_SCK_MHZ(10)))) {
 		SDx.initErrorHalt(&Serial);
@@ -73,10 +76,17 @@ void setup() {
 	auto config = out->defaultConfig();
 	config.copyFrom(info);
 	config.pin_data = 25;
+	config.channels = 2;
 	out->begin(config);
 
-	dec = new EncodedAudioStream(out, new MP3DecoderHelix());
-	// dec->setNotifyAudioChange(*out);
+	volume = new VolumeStream(*out);
+	volume->setVolumeControl(lvc);
+	volume->setVolume(0.2);
+
+	// auto codec = new MP3DecoderMAD();
+	auto codec = new MP3DecoderHelix();
+	dec = new EncodedAudioStream(volume, codec);
+	dec->setNotifyAudioChange(*out);
 	dec->begin();
 
 	copier = new StreamCopy();
